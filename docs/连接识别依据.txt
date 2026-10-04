@@ -1,0 +1,20 @@
+连接识别实现依据
+
+1. XInputGetCapabilitiesEx（Windows XInput 1.4 可选导出 108）只读取所选槽位的
+   VID/PID。调用布局参照 SDL 自身的实现；不可用时保持未知，不伪造默认设备身份。
+   https://github.com/libsdl-org/SDL/blob/main/src/core/windows/SDL_xinput.h
+   https://github.com/libsdl-org/SDL/blob/main/src/joystick/windows/SDL_xinputjoystick.c
+
+2. Windows SetupAPI 只枚举当前在线的匹配 HID 输入，沿配置管理器的父节点核对
+   蓝牙、USB 和虚拟驱动。蓝牙优先于 USB 无线网卡父节点，排除本程序虚拟设备。
+   同型号存在多只候选设备时，不能通过 VID/PID 唯一匹配，因此显示未知。
+   https://learn.microsoft.com/en-us/windows/win32/api/xinput/ns-xinput-xinput_capabilities
+
+3. 八爪鱼 6 的接收器也出现在 USB 总线上，不能直接据此判断为有线。
+   向选定且唯一的厂商接口只查询 0x07 架构和 0x01 信息，不发送模式/马达/存储命令。
+   新架构 0=USB、1=接收器；旧架构 1=USB、2=接收器。解释参照 SDL 的
+   HIDAPI_DriverFlydigi_InitControllerV2；按设备实际应答判断，超时保留未知。
+   https://github.com/libsdl-org/SDL/blob/main/src/joystick/hidapi/SDL_hidapi_flydigi.c
+
+4. UI 在线程中查询，按选择序号丢弃过时结果。每次启动和轻震测试前重新核对。
+   扩展输入适配器可独立提供 connection(slot)，无需把品牌逻辑加进界面。

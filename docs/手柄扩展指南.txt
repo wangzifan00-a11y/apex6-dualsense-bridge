@@ -1,0 +1,60 @@
+手柄扩展接口 v1
+
+当前内置：通用 XInput 双马达；八爪鱼 6 / 6 Pro 接收器四马达（须通过协议核验）。
+预留接口不代表已经支持其他品牌的私有波形、扳机或无线协议。
+
+一、编写独立适配器
+使用 dsbridge.core.ports.ControllerAdapter 和 BridgeProfile 声明厂商、型号、
+连接方式、能力、依赖和模式。通过 ControllerRegistry.register 注册即可。
+GUI 从注册表读取模式和设备列表，无须增加厂商分支。
+
+input_factory() 返回输入端口：
+  slots：可用设备标识序列，标识可以是整数或字符串。
+  get_state(slot)：断连返回 None，否则返回字典。
+  label(slot)：用于界面的名称（使用字符串标识时必须提供）。
+  connection(slot)：可选，返回 dsbridge.core.connection.ControllerConnection。
+    kind 使用 bluetooth / receiver / usb / unknown / disconnected / virtual。
+    此方法由独立后台输入实例调用，只查询身份和连接状态，不操作马达或更改配置。
+    不提供此方法时显示“当前手柄扩展未提供连接方式检测”，不猜测其传输方式。
+  set_rumble(slot, left, right)：0..1 左右强度，断连返回 False。
+  close()：释放调用线程拥有的资源；后续重新读取应能再次启用。
+
+状态字典：buttons 为 XInput 按键位图，left_trigger/right_trigger 为 0..255，
+lx/ly/rx/ry 为 -32768..32767。只使用此规范作为统一输入表示，不改变游戏的 Sony 身份。
+
+backend_factory(paths, config, profile) 返回 start/update/poll_feedback/stop 后端。
+双马达适配器可复用 LocalViiper；poll_feedback 返回 None 表示无新反馈，
+(0,0) 表示游戏明确停振。引擎负责增益和输出，停止时归零。
+
+波形适配器将 profile.managed_output 设为 True，并实现 set_gain 和 status；
+引擎不会再调用 set_rumble，避免覆盖私有波形。可复用 ManagedFeedbackBridge，
+提供自己的 output、virtual_factory、decoder、输入隔离 lease 和隔离验证函数。
+output 实现 start、arm、accept(SonyFeedback)、update、set_gain、poll_feedback、
+status、stop，以及 error/last_cleanup_error 属性。start 初始化后保持静音，arm 才启振。
+
+SonyFeedback 包含时间、可选普通震动、可选双声道 PCM（3 kHz signed-8 数值），
+以及解码后的 TriggerUpdate。None 表示保留前值；不要将灯光/空反馈当作停振。
+PCM 只来自游戏给 DS 的触觉声道，不是系统扬声器、背景音乐或麦克风音频。
+status 可提供 output={labels,values,peak,nonzero_writes} 让界面显示任意马达数量。
+
+每个私有协议实现必须自行验证 VID/PID、设备身份、能力及配置是否可恢复；
+未通过验证时拒绝写入。一个线程拥有输出设备，断连即停，队列有界；
+恢复动作放在 finally，恢复记录先落盘再更改设备。不要修改不属于本适配器的隐藏项。
+
+二、在便携程序中加载可选扩展
+把开发好的纯 Python 包放入：
+  %LOCALAPPDATA%\DSFeedbackBridge\plugins\dsbridge_ext_品牌名\__init__.py
+在该数据目录创建 adapters.json，例如：
+  ["dsbridge_ext_example"]
+包导出 register(registry)，该函数注册 ControllerAdapter，导入阶段不要操作硬件。
+未在 adapters.json 中明确列出的包不会被加载。仅启用自己信任的本地代码。
+额外第三方 Python/原生依赖应随扩展提供兼容本发布包 Python ABI 的版本；
+普通终端用户使用内置适配器无需安装 Python。驱动安装仍需单独显式操作。
+
+模式 ID 建议用“品牌.型号.连接方式”字符串。禁止重用删除的 0、2、3、4 和内置 1、5。
+sony 只能为 dualsense，注册其他 Sony 类型会被拒绝。API_VERSION 当前为 1。
+deps 只能引用依赖管理器已有包；新增驱动应在源代码中注册并重新审核、构建。
+
+参考 examples\dsbridge_ext_example。示例刻意不发硬件命令，不应在日常使用时启用。
+测试 tests\test_modular_architecture.py 用另一品牌模拟端口验证完整注册、创建、
+输入、反馈、停振流程；无需改变 Engine 或 Tk 窗口。

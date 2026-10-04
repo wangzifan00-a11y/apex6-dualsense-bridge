@@ -1,0 +1,48 @@
+DS 反馈桥 · 模块化版本
+
+应用入口 app.py 仅负责源码依赖路径和命令分发。
+
+dsbridge/core
+  平台无关的手柄输入/反馈接口、桥接引擎、模式配置、会话统计与生命周期组合。
+  不导入 Tk、Windows 原生 API、厂商协议或网络传输实现。
+
+dsbridge/application
+  组合根与命令入口。把手柄注册表、依赖管理、数据目录和诊断服务连接到界面。
+
+dsbridge/controllers
+  注册表、可选本地扩展，以及通用 XInput 双马达实现。
+  flydigi/apex6 仅负责已验证的八爪鱼接收器：身份核验、私有 HID、DSP、
+  四马达输出、配置还原和输入隔离。output.py 不处理 VIIPER 二进制报文。
+
+dsbridge/virtual/dualsense
+  codec.py：纯 VPCM V5 / Sony 报文编解码。
+  feedback.py：把 Sony 报文转为统一 PCM、普通震动及扳机效果事件。
+  transport.py：TCP、虚拟手柄与协议会话。
+  runtime.py：本程序所拥有的 VIIPER 进程、虚拟 USB 与音频保护。
+
+dsbridge/platform/windows
+  Windows 原生服务：XInput、所选设备的连接方式检测、HidHide、默认音频、USB/IP、进程句柄、UAC。
+dsbridge/dependencies
+  固定版本与校验值、只读系统探测、安装状态机。
+dsbridge/ui
+  Tk 视图、依赖安装面板、纯文本呈现。
+dsbridge/runtime
+  只读资源和每用户可写状态分离；所有子进程继承明确的数据目录。
+dsbridge/diagnostics
+  显式启动的检查与集成自检，不在正常桥接时加载系统音频拟震功能。
+
+数据流
+  实体输入适配器 → 统一按键/摇杆状态 → 虚拟 Sony 手柄 → 游戏
+  游戏的 Sony 反馈 → 协议解码 → 统一反馈事件 → 对应手柄输出适配器
+
+生命周期
+  接收器模式先保存恢复记录、隔离实体输入，初始化输出后创建虚拟 Sony。
+  停止时先停振并恢复马达配置，再移除虚拟 Sony，最后恢复实体输入。
+  看护进程持有实际父进程句柄；异常退出与登录恢复仍使用本程序持有的记录。
+
+发布目录只放运行资源，不放本机身份、音频默认值、HidHide 设备记录或游戏日志。
+默认数据目录：%LOCALAPPDATA%\DSFeedbackBridge
+测试或特殊部署可用 --data-dir "完整路径" 指定。
+
+顶层兼容模块用于现有测试；生产代码通过 dsbridge 包导入。
+本仓库按 2.1.0 发布包中的实际模块整理，仅包含当前 PS5 桥接代码及相关测试。
