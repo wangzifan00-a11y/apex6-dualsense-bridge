@@ -12,6 +12,10 @@ import zlib
 from dsbridge.controllers.flydigi.apex6.hid import ReceiverError
 
 
+class _ReplyTimeout(ReceiverError):
+    """A missing reply, distinct from disconnection or malformed data."""
+
+
 def command_report(command, payload=b""):
     if isinstance(command, bool) or not isinstance(command, int) or not 0 <= command <= 255:
         raise ValueError("Invalid receiver command")
@@ -52,17 +56,47 @@ def parse_reply(report, command, length, *, ram=False):
 
 
 class ReceiverProtocol:
-    def __init__(self, transport):
+    def __init__(self, transport, *, reply_timeout=0.8, cancel=None):
         self.transport = transport
+        self.reply_timeout = reply_timeout
+        self.cancel = cancel
         self.query_count = 0
         self.configuration_count = 0
+        self.reply_recoveries = 0
         self.last_mode_replies = []
 
     def ask(self, command, length, payload=b"", *, ram=False):
+        try:
+            return self._ask_once(command, length, payload, ram=ram)
+        except _ReplyTimeout:
+            # Identical input reports can be suppressed across HID handles.
+            # Auto-detection ends with 0x01, so a newly opened motor session's
+            # first 0x01 may receive nothing even though the pad is online.
+            # Resynchronize only read-only requests; never replay a write whose
+            # ACK was lost (notably 0x53, which may already have changed routing).
+            readonly = (command in (0x01, 0x04, 0xA1) and not payload and not ram)
+            readonly |= (command == 0xA3 and ram and (payload == b"\1\6" or
+                         (len(payload) == 4 and payload[:2] == b"\0\6" and payload[2] < 4 and payload[3] == 16)))
+            if not readonly:
+                raise
+        separator, separator_length = (0x04, 16) if command == 0x01 else (0x01, 25)
+        try:
+            self._ask_once(separator, separator_length)
+        except _ReplyTimeout:
+            # The separator itself can match the last report of an older
+            # handle. The original request is now distinct; try it once only.
+            pass
+        result = self._ask_once(command, length, payload, ram=ram)
+        self.reply_recoveries += 1
+        return result
+
+    def _ask_once(self, command, length, payload=b"", *, ram=False):
+        self._check_cancel()
         self.transport.write(command_report(command, payload))
         self.query_count += 1
-        deadline = time.monotonic() + 0.8
+        deadline = time.monotonic() + self.reply_timeout
         while time.monotonic() < deadline:
+            self._check_cancel()
             reply = self.transport.read(max(1, round((deadline - time.monotonic()) * 1000)))
             if reply is not None:
                 if command == 0x53 and reply[1:3] == b"\x5a\xa5" and reply[3] != 0xEF:
@@ -71,7 +105,11 @@ class ReceiverProtocol:
                 found = parse_reply(reply, command, length, ram=ram)
                 if found is not None:
                     return found
-        raise ReceiverError(f"APEX 6 未应答 0x{command:02X}；请检查手柄已通过接收器连接，且飞智软件已关闭")
+        raise _ReplyTimeout(f"APEX 6 控制接口未应答 0x{command:02X}；请确认手柄已唤醒，并关闭其他占用手柄的软件后重试")
+
+    def _check_cancel(self):
+        if self.cancel is not None and self.cancel.is_set():
+            raise ReceiverError("接收器查询已停止")
 
     def identity(self):
         data = self.ask(1, 25)

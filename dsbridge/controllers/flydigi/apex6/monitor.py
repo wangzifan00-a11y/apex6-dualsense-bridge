@@ -21,7 +21,7 @@ class ReceiverMonitor:
     def _run(self):
         try:
             with ReceiverHID(self.path) as transport:
-                protocol = ReceiverProtocol(transport)
+                protocol = ReceiverProtocol(transport, cancel=self.cancel)
                 while not self.cancel.wait(1):
                     if protocol.identity()["uid"] != self.uid:
                         raise ReceiverError("接收器连接的手柄已更换，转换已停止")

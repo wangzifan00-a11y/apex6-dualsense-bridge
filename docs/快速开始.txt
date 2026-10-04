@@ -1,4 +1,4 @@
-八爪鱼震动桥 2.1.0 · PS5 DualSense 桥接专用版
+八爪鱼震动桥 2.1.1 · PS5 DualSense 桥接专用版
 
 换电脑运行
 解压整个 Windows-x64.zip，双击“八爪鱼震动桥.exe”。
