@@ -13,7 +13,7 @@
 
 ## 使用
 
-1. 在 Releases 下载 `八爪鱼震动桥-2.1.0-Windows-x64.zip`，完整解压后运行 `八爪鱼震动桥.exe`，无需安装 Python。
+1. 在 Releases 下载 `apex6-dualsense-bridge-2.1.0-Windows-x64.zip`，完整解压后运行 `八爪鱼震动桥.exe`，无需安装 Python。
 2. 首次使用打开“依赖检查与安装”，按提示安装 USBip、HidHide；提示重启时保存工作后重启。
 3. 先关闭游戏，连接手柄，点击“检测”并选择手柄，等待自动识别后启动转换，再打开游戏。
 4. 支持原生 DualSense 的 Steam 游戏，请禁用该游戏的 Steam 输入。蓝牙的 HidHide 隔离设置见[完整说明](docs/快速开始.txt)。
