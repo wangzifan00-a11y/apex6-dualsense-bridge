@@ -305,19 +305,34 @@ class ReceiverInputLease:
         self.report_path = self.base / ("input-guard-" + self.token + ".json")
 
     def start(self):
+        return self.start_cancellable(lambda: None)
+
+    def start_cancellable(self, check):
+        check()
         self.ready = self.native.event(self.token, ".ready")
         self.stop_event = self.native.event(self.token, ".stop")
         args = self.paths.command("--receiver-input-guard", self.token, str(os.getpid()))
         try:
             self.process = subprocess.Popen(args, creationflags=subprocess.CREATE_NO_WINDOW)
             handles = (W.HANDLE * 2)(self.ready, int(self.process._handle))
-            if self.native.k.WaitForMultipleObjects(2, handles, False, 20000) not in (0, 1):
-                raise RuntimeError("接收器自动输入隔离启动超时")
+            deadline = time.monotonic() + 20
+            while True:
+                check()
+                result = self.native.k.WaitForMultipleObjects(2, handles, False, 100)
+                if result in (0, 1):
+                    break
+                if result != 258 or time.monotonic() >= deadline:
+                    raise RuntimeError("接收器自动输入隔离启动超时")
+            check()
             report = json.loads(self.report_path.read_text(encoding="utf-8"))
             if report.get("phase") != "ready" or self.process.poll() is not None:
                 raise RuntimeError(report.get("error") or report.get("restore_error") or "输入恢复进程提前结束")
         except Exception:
-            self.stop()
+            try:
+                self.stop()
+            except Exception:
+                # Engine cleanup retries stop; keep the initiating disconnect.
+                pass
             raise
 
     @property

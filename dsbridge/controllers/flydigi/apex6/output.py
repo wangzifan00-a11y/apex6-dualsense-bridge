@@ -47,15 +47,26 @@ class Apex6Output:
         self._cleanup_status = "尚未启动"
 
     def start(self):
+        return self.start_cancellable(lambda: None)
+
+    def start_cancellable(self, check):
         self._cancel.clear()
         self._ready.clear()
         self._armed.clear()
         self._thread = threading.Thread(target=self._worker, name="Receiver haptic waveforms", daemon=True)
         self._thread.start()
-        if not self._ready.wait(10):
-            raise ReceiverError("接收器启动超时，正在停止并恢复")
-        if self._failure:
-            raise ReceiverError(str(self._failure))
+        deadline = time.monotonic() + 10
+        try:
+            while not self._ready.wait(0.05):
+                check()
+                if time.monotonic() >= deadline:
+                    raise ReceiverError("接收器启动超时，正在停止并恢复")
+            check()
+            if self._failure:
+                raise self._failure
+        except Exception:
+            self._cancel.set()
+            raise
 
     def arm(self):
         self._cleanup_status = "运行中"
@@ -63,7 +74,7 @@ class Apex6Output:
 
     @property
     def error(self):
-        return self._failure
+        return self._failure or (self.monitor.error if self.monitor else None)
 
     def set_gain(self, gain):
         if not math.isfinite(gain) or not 0 <= gain <= 1.5:
@@ -136,6 +147,7 @@ class Apex6Output:
     def _worker(self):
         try:
             # Claim, HID handle, waveform writes and restoration have one owner.
+            self.session.cancel = self._cancel
             self.session.start()
             if self.monitor_factory:
                 self.monitor = self.monitor_factory(self.session)
@@ -144,11 +156,13 @@ class Apex6Output:
             while not self._armed.is_set():
                 if self._cancel.wait(0.01):
                     return
+                if self.monitor and self.monitor.error:
+                    raise self.monitor.error
             deadline = time.perf_counter()
             while not self._cancel.is_set():
                 now = time.perf_counter()
                 if self.monitor and self.monitor.error:
-                    raise ReceiverError(str(self.monitor.error))
+                    raise self.monitor.error
                 left, right, trigger, selector, enabled, rendered_triggers = self._render(time.monotonic())
                 self.session.send(left, right, trigger, selector=selector, trigger_enabled=True)
                 # Use zero Both when inactive to clear either previous trigger.
@@ -197,7 +211,7 @@ class Apex6Output:
 
     def poll_feedback(self):
         if self.error:
-            raise ReceiverError(str(self.error))
+            raise self.error
         with self._lock:
             return self._last_output[:2]  # UI meter only; never sent to XInput.
 

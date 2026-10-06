@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 EXCLUDED = ("audio_haptics", "xbox_ds_backend", "probe_xbox_ds", "dsbridge.legacy", "dsbridge.virtual.dualshock4")
 RUNTIME_FILES = {"controller-identity.json", "audio-defaults.json", "receiver-hidhide-session.json",
                  "receiver-session.json", "receiver-input-lease.json", "feedback-session.json",
-                 "hidhide-session.json", "dependency-install-state.json", "viiper-usb-session.json"}
+                 "hidhide-session.json", "dependency-install-state.json", "viiper-usb-session.json", "ui-settings.json"}
 
 
 def sha(path):

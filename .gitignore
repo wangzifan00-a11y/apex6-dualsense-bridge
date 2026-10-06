@@ -23,3 +23,5 @@ latest-*.txt
 audio-defaults.json
 feedback-session.json
 dependency-install-state.json
+ui-settings.json
+.ui-settings-*.tmp

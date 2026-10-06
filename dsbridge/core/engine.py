@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 from dsbridge.core.modes import PROFILES
+from dsbridge.core.ports import BridgeCancelled, ControllerDisconnected
 
 def scale_feedback(value, gain):
     if len(value) != 2 or not math.isfinite(float(gain)):
@@ -61,7 +62,17 @@ class Engine:
         output_peak = (0.0, 0.0)
         output_nonzero_writes = 0
         failure = None
+        disconnected = False
         metadata = None
+
+        def check_start():
+            if self.cancel.is_set():
+                raise BridgeCancelled()
+            if self.xinput.get_state(index) is None:
+                raise ControllerDisconnected("手柄连接已断开，正在停止本次桥接。重新连接后请检测并启动。")
+            error = getattr(backend, "error", None) if backend else None
+            if error:
+                raise error if isinstance(error, Exception) else RuntimeError(str(error))
 
         def session_record(phase):
             # Do not store button/axis input, audio samples or microphone data.
@@ -74,8 +85,14 @@ class Engine:
         # The receiver owns waveform output; never overwrite it with XInput rumble.
         owns_rumble = not profile.managed_output
         try:
+            check_start()
             backend = self._make_backend(mode)
-            backend.start()
+            start_cancellable = getattr(backend, "start_cancellable", None)
+            if start_cancellable:
+                start_cancellable(check_start)
+            else:
+                backend.start()
+            check_start()
             self.events.put(("status", "已启动：" + profile.label))
             last_value = None
             last_raw = (0, 0)
@@ -85,11 +102,11 @@ class Engine:
                 now = time.monotonic()
                 state = self.xinput.get_state(index)
                 if state is None:
-                    raise RuntimeError("手柄连接已断开，转换已停止。重新连接后请检测并启动。")
+                    raise ControllerDisconnected("手柄连接已断开，正在停止本次桥接。重新连接后请检测并启动。")
                 if backend:
                     error = getattr(backend, "error", None)
                     if error:
-                        raise RuntimeError(str(error))
+                        raise error if isinstance(error, Exception) else RuntimeError(str(error))
                     if profile.managed_output:
                         backend.set_gain(self.gain)
                     backend.update(state)
@@ -100,7 +117,7 @@ class Engine:
                     value = last_raw if profile.managed_output else scale_feedback(last_raw, self.gain)
                     if owns_rumble and (value != last_value or now - last_write >= 0.1):
                         if self.xinput.set_rumble(index, *value) is False:
-                            raise RuntimeError("手柄已断开，无法输出震动")
+                            raise ControllerDisconnected("手柄已断开，正在停止本次桥接。重新连接后请检测并启动。")
                         if any(value):
                             output_nonzero_writes += 1
                         output_peak = tuple(max(output_peak[lane], value[lane]) for lane in (0, 1))
@@ -116,10 +133,19 @@ class Engine:
                                                "ps5": metadata, "session": session_record("running")}))
                     last_ui = now
                 self.cancel.wait(0.004)
+        except BridgeCancelled:
+            pass
+        except ControllerDisconnected as exc:
+            disconnected = True
+            failure = str(exc)
+            self.events.put(("disconnected", str(exc)))
         except Exception as exc:
             failure = str(exc)
             if self.diagnostics:
-                self.diagnostics.exception("controller_engine", *sys.exc_info())
+                try:
+                    self.diagnostics.exception("controller_engine", *sys.exc_info())
+                except Exception:
+                    pass  # Diagnostic storage failure must never bypass cleanup.
             self.events.put(("error", str(exc)))
         finally:
             # Stop motors before any potentially slow virtual-device cleanup.
@@ -142,10 +168,15 @@ class Engine:
                     if hasattr(backend, "status"):
                         metadata = backend.status()
                 except Exception as exc:
-                    failure = failure or ("停止后的设备恢复未完成：" + str(exc))
-                    self.events.put(("error", failure))
+                    cleanup_failure = "停止后的设备恢复未完成：" + str(exc)
+                    failure = failure or cleanup_failure
+                    self.events.put(("error", cleanup_failure))
             close_input = getattr(self.xinput, "close", None)
             if close_input:
-                close_input()
-            self.events.put(("session_end", session_record("failed" if failure else "stopped")))
+                try:
+                    close_input()
+                except Exception as exc:
+                    failure = failure or ("停止后的输入资源释放未完成：" + str(exc))
+                    self.events.put(("error", "停止后的输入资源释放未完成：" + str(exc)))
+            self.events.put(("session_end", session_record("disconnected" if disconnected else "failed" if failure else "stopped")))
             self.events.put(("stopped", None))

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ctypes as C
+from dsbridge.core.ports import ControllerDisconnected
 
 from dsbridge.diagnostics.sony_writer import (_Api, DWORD, GUID, HANDLE, SP_DEVICE_INTERFACE_DATA,
                               SP_DEVINFO_DATA, INVALID_HANDLE_VALUE)
@@ -11,6 +12,17 @@ VID, PID, USAGE_PAGE = 0x37D7, 0x2502, 0xFFA0
 
 class ReceiverError(RuntimeError):
     pass
+
+
+class ReceiverDisconnected(ReceiverError, ControllerDisconnected):
+    pass
+
+
+def io_error(operation, code):
+    # Windows reports physical removal through these device I/O errors.
+    if code in (6, 433, 1167):
+        return ReceiverDisconnected("手柄或接收器已断开，正在停止本次桥接")
+    return ReceiverError(f"接收器 {operation}失败：{code}")
 
 
 def receiver_interfaces():
@@ -122,7 +134,7 @@ class ReceiverHID:
             if not result:
                 error = C.get_last_error()
                 if error != 997:
-                    raise ReceiverError(f"接收器 {'写入' if writing else '读取'}失败：{error}")
+                    raise io_error('写入' if writing else '读取', error)
                 ready = self.api.kernel.WaitForSingleObject(event, timeout_ms)
                 if ready != 0:
                     self.api.kernel.CancelIoEx(self.handle, C.byref(overlapped))
@@ -134,7 +146,7 @@ class ReceiverHID:
                         return None
                     raise ReceiverError(f"接收器 I/O 等待失败：{ready}")
                 if not self.api.kernel.GetOverlappedResult(self.handle, C.byref(overlapped), C.byref(transferred), False):
-                    raise ReceiverError(f"接收器 I/O 完成失败：{C.get_last_error()}")
+                    raise io_error("I/O 完成", C.get_last_error())
             if transferred.value != 33:
                 raise ReceiverError(f"接收器报告不完整：{transferred.value}/33")
             return bytes(buffer.raw) if not writing else None

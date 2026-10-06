@@ -1,3 +1,4 @@
+import gc
 import json
 from pathlib import Path
 import time
@@ -52,6 +53,9 @@ class DependencyUITests(unittest.TestCase):
     def tearDown(self):
         self.until(lambda: not self.panel.installing)
         self.root.destroy()
+        self.panel = self.root = None
+        # Do not leave destroyed Tcl variables for a later bridge worker's GC.
+        gc.collect()
 
     def test_missing_opens_setup_before_controller_and_allows_install(self):
         self.assertFalse(self.panel.guard_start(5))

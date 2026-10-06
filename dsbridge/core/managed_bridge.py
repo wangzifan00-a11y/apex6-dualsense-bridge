@@ -18,15 +18,29 @@ class ManagedFeedbackBridge:
             self.output.accept(feedback)
 
     def start(self):
+        return self.start_cancellable(lambda: None)
+
+    def start_cancellable(self, check):
         try:
+            check()
             if self.isolation:
-                self.isolation.start()
+                start_isolation = getattr(self.isolation, "start_cancellable", None)
+                start_isolation(check) if start_isolation else self.isolation.start()
+            check()
             self.verify()
-            self.output.start()
-            self.viiper.start()
+            check()
+            start_output = getattr(self.output, "start_cancellable", None)
+            start_output(check) if start_output else self.output.start()
+            check()
+            start_virtual = getattr(self.viiper, "start_cancellable", None)
+            start_virtual(check) if start_virtual else self.viiper.start()
+            check()
             self.output.arm()
         except Exception:
-            self.stop()
+            try:
+                self.stop()
+            except Exception as cleanup:
+                self.last_cleanup_error = "；".join(filter(None, (self.last_cleanup_error, str(cleanup))))
             raise
 
     @property
@@ -42,7 +56,8 @@ class ManagedFeedbackBridge:
 
     def poll_feedback(self):
         if self.error:
-            raise RuntimeError(str(self.error))
+            error = self.error
+            raise error if isinstance(error, Exception) else RuntimeError(str(error))
         return self.output.poll_feedback()
 
     def status(self):

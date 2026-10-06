@@ -123,6 +123,9 @@ class ViiperBackend:
         return result
 
     def start(self) -> None:
+        return self.start_cancellable(lambda: None)
+
+    def start_cancellable(self, check_cancel) -> None:
         if self._socket is not None or self.bus_id is not None:
             raise ViiperError("VIIPER backend already started; call stop() before reconnecting")
         self._stop.clear()
@@ -137,15 +140,18 @@ class ViiperBackend:
             self._native_nonzero = self._rumble_nonzero = 0
             self._native_peak = self._rumble_peak = (0.0, 0.0)
         try:
+            check_cancel()
             ping = self._management("ping")
             if ping.get("server") != "VIIPER":
                 raise ProtocolError("本机端口上的服务不是 VIIPER")
             self.server_version = ping.get("version", "unknown")
+            check_cancel()
             created = self._management("bus/create")
             bus_id = created.get("busId")
             if not isinstance(bus_id, int) or not 1 <= bus_id <= 0xFFFFFFFF:
                 raise ProtocolError("VIIPER returned an invalid bus ID")
             self.bus_id = bus_id
+            check_cancel()
             identity = self.controller_identity or uuid.uuid4().hex.upper()
             options = {"type": self.device_type, "deviceSpecific": {
                 "serial_number": "APEX01" + identity[:10],
@@ -161,6 +167,7 @@ class ViiperBackend:
             self.usbip_port = device.get("usbipPort")
             if self.on_attachment:
                 self.on_attachment(bus_id, device_id, self.usbip_port)
+            check_cancel()
             if self.require_attachment and sys.platform == "win32":
                 if not isinstance(self.usbip_port, int) or self.usbip_port <= 0:
                     raise ViiperError("VIIPER 已创建设备，但没有确认 Windows USB/IP 挂载。"
@@ -168,12 +175,14 @@ class ViiperBackend:
                                       "只有 TCP 服务不足以让游戏识别 DualSense。")
             conn = socket.create_connection((self.host, self.port), timeout=self.timeout)
             self._socket = conn
+            check_cancel()
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             conn.settimeout(0.2)
             conn.sendall(f"bus/{bus_id}/{device_id}\0".encode("ascii"))
             self._thread = threading.Thread(target=self._receive, name="VIIPER-feedback", daemon=True)
             self._thread.start()
             self.update({})
+            check_cancel()
         except Exception:
             self.stop()
             raise

@@ -1,5 +1,6 @@
 """Exercise actual Tk selection callbacks with fake, non-output input adapters."""
 from dataclasses import replace
+import gc
 import json
 from pathlib import Path
 import threading
@@ -66,8 +67,13 @@ class ConnectionUITests(unittest.TestCase):
                 device.event_generate("<<ComboboxSelected>>")
             root.after(25, select)
             return root
-        with patch("tkinter.Tk", side_effect=create):
-            run_gui(smoke=True, context=context)
+        try:
+            with patch("tkinter.Tk", side_effect=create):
+                run_gui(smoke=True, context=context)
+        finally:
+            # Tk callbacks retain cycles after destroy(). Release their Tcl
+            # variables here, before a later worker thread triggers cyclic GC.
+            gc.collect()
         report = json.loads((state / "gui-smoke.json").read_text(encoding="utf-8"))
         self.assertTrue(report["connection_check_finished"])
         self.assertTrue(report["automatic_modes"])

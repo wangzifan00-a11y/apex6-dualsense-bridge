@@ -5,6 +5,14 @@ from typing import Callable, Mapping, Protocol
 API_VERSION = 1
 
 
+class ControllerDisconnected(RuntimeError):
+    """The selected physical input or its receiver control link was lost."""
+
+
+class BridgeCancelled(RuntimeError):
+    """A requested stop interrupted initialization before the bridge was armed."""
+
+
 class InputPort(Protocol):
     slots: tuple
     def get_state(self, slot) -> Mapping[str, int] | None: ...

@@ -82,6 +82,7 @@ class Apex6Session:
         self.packet_count = 0
         self.cleanup_errors = []
         self.restored = False
+        self.cancel = None
 
     def _save(self):
         self.journal["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -101,6 +102,7 @@ class Apex6Session:
                 path = candidates[0]["path"]
             self.transport = self.transport_factory(path)
             self.protocol = ReceiverProtocol(self.transport)
+            self.protocol.cancel = self.cancel
             self.identity = self.protocol.identity()
             self.slot, self.mapping = self.protocol.motor_mapping()
             if self.journal_path.exists():
@@ -134,7 +136,10 @@ class Apex6Session:
             time.sleep(0.1)
             self.neutral()
         except Exception:
-            self.stop()
+            try:
+                self.stop()
+            except Exception as exc:
+                self.cleanup_errors.append(str(exc))
             raise
 
     def send(self, left=ZERO, right=ZERO, trigger=ZERO, *, selector=3, trigger_enabled=False):
@@ -162,6 +167,10 @@ class Apex6Session:
             raise ReceiverError("；".join(errors))
 
     def stop(self):
+        if self.protocol:
+            # Cancellation aborts setup only. Restoration must still be tried
+            # once with bounded queries and its pending journal kept on loss.
+            self.protocol.cancel = None
         try:
             if self.transport and self.touched:
                 try:
@@ -201,12 +210,19 @@ class Apex6Session:
                 self.journal["cleanup_errors"] = self.cleanup_errors
                 self._save()
         finally:
-            if self.transport:
-                self.transport.close()
-                self.transport = None
-            if self.claim:
-                self.claim.close()
-                self.claim = None
+            try:
+                if self.journal and self.cleanup_errors:
+                    self.journal.update(restore_pending=not self.restored, cleanup_errors=self.cleanup_errors)
+                    self._save()
+            finally:
+                try:
+                    if self.transport:
+                        self.transport.close()
+                finally:
+                    self.transport = None
+                    if self.claim:
+                        self.claim.close()
+                        self.claim = None
 
 
 def recover_pending_motors(base):

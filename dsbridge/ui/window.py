@@ -11,6 +11,7 @@ from dsbridge.core.engine import Engine
 from dsbridge.core.session_log import FeedbackSessionLog
 from dsbridge.core.modes import MODES, MODE_IDS, DETAILS
 from dsbridge.ui.presentation import feedback_text
+from dsbridge.runtime.preferences import GainPreferences, gain_percent, MIN_GAIN_PERCENT, MAX_GAIN_PERCENT
 from dsbridge import __version__
 
 def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_test=False, setup=False, *, context=None):
@@ -59,9 +60,14 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
     meter_var = tk.StringVar(value="输入：—    反馈：—")
     ps5_var = tk.StringVar(value="")
     audio_status_var = tk.StringVar(value="默认音频：正在检查扬声器和麦克风…")
-    gain_var = tk.DoubleVar(value=0 if receiver_close_test else 70)
+    preferences = GainPreferences(BASE)
+    gain_var = tk.DoubleVar(value=0 if receiver_close_test else preferences.percent)
+    engine.gain = gain_var.get() / 100
+    gain_save_timer = None
+    gain_save_error = None
     devices = {}
     audio_repair_thread = None
+    disconnect_notice = None
 
     row = ttk.Frame(frame)
     row.pack(fill="x")
@@ -76,8 +82,10 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
         log_box.configure(state="disabled")
 
     def detect():
+        nonlocal disconnect_notice
         if engine.running:
             return
+        disconnect_notice = None
         previous = device_var.get()
         devices.clear()
         xi.select(MODE_IDS[mode_var.get()])
@@ -144,15 +152,50 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
     mode_box.bind("<<ComboboxSelected>>", mode_changed)
     gain_row = ttk.Frame(frame)
     gain_row.pack(fill="x", pady=(18, 8))
-    gain_label = ttk.Label(gain_row, text="转换强度 70%")
+    gain_label = ttk.Label(gain_row, text="转换强度 " + str(round(gain_var.get())) + "%")
     gain_label.pack(side="left")
 
-    def gain_changed(value):
-        engine.gain = float(value) / 100
-        gain_label.configure(text="转换强度 " + str(round(float(value))) + "%")
+    gain_help = "调节 DS 桥接后的震动强度；反馈内容由游戏提供。"
 
-    ttk.Scale(gain_row, from_=0, to=150, variable=gain_var, command=gain_changed).pack(side="left", fill="x", expand=True, padx=16)
-    ttk.Label(frame, text="调节 DS 桥接后的震动强度；反馈内容由游戏提供。", foreground="#66758a").pack(anchor="w")
+    def save_gain(*, closing_window=False):
+        nonlocal gain_save_timer, gain_save_error
+        if gain_save_timer is not None:
+            root.after_cancel(gain_save_timer)
+            gain_save_timer = None
+        # A diagnostic's temporary zero must never replace the user's setting.
+        if receiver_close_test:
+            return
+        try:
+            preferences.save(gain_percent(gain_var.get()))
+        except OSError as exc:
+            message = "转换强度保存失败：" + str(exc)
+            gain_help_label.configure(text="强度尚未保存，下次打开可能恢复原值。详情见运行日志。", foreground="#b34525")
+            if message != gain_save_error:
+                log(message)
+                if APP_DIAGNOSTICS:
+                    APP_DIAGNOSTICS.event("gain_settings_save_failed", error=str(exc))
+            gain_save_error = message
+            if closing_window and not smoke:
+                messagebox.showwarning("强度未保存", "本次转换强度未能保存，下次打开可能恢复原值。\n" + str(exc))
+            return
+        if gain_save_error:
+            log("转换强度已保存。")
+        gain_save_error = None
+        gain_help_label.configure(text=gain_help, foreground="#66758a")
+
+    def gain_changed(value):
+        nonlocal gain_save_timer
+        percent = gain_percent(float(value))
+        gain_var.set(percent)
+        engine.gain = percent / 100
+        gain_label.configure(text="转换强度 " + str(percent) + "%")
+        if gain_save_timer is not None:
+            root.after_cancel(gain_save_timer)
+        gain_save_timer = root.after(500, save_gain)
+
+    ttk.Scale(gain_row, from_=MIN_GAIN_PERCENT, to=MAX_GAIN_PERCENT, variable=gain_var, command=gain_changed).pack(side="left", fill="x", expand=True, padx=16)
+    gain_help_label = ttk.Label(frame, text=gain_help, foreground="#66758a", wraplength=780)
+    gain_help_label.pack(anchor="w")
     controls = ttk.Frame(frame)
     controls.pack(fill="x", pady=14)
 
@@ -171,6 +214,7 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
         detect_selected(action="start")
 
     def start_checked():
+        nonlocal disconnect_notice
         if not dependency_panel.guard_start(MODE_IDS[mode_var.get()]):
             return
         if device_var.get() not in devices:
@@ -178,6 +222,7 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
             return
         try:
             mode = MODE_IDS[mode_var.get()]
+            disconnect_notice = None
             engine.gain = gain_var.get() / 100
             engine.start(devices[device_var.get()], mode)
             set_busy(True)
@@ -250,6 +295,11 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
     closing = False
     pump_timer = None
     gui_errors = []
+    if preferences.load_error:
+        log("上次转换强度无法读取，已使用默认 70%：" + preferences.load_error)
+        gain_help_label.configure(text="上次强度设置无法读取，已使用默认 70%。", foreground="#b34525")
+        if APP_DIAGNOSTICS:
+            APP_DIAGNOSTICS.event("gain_settings_load_failed", error=preferences.load_error)
 
     def destroy_window():
         nonlocal pump_timer
@@ -281,7 +331,7 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
     root.report_callback_exception = report_gui_exception
 
     def pump_once():
-        nonlocal closing, session_log_failed, connection_pending, selected_connection
+        nonlocal closing, session_log_failed, connection_pending, selected_connection, disconnect_notice
         try:
             while True:
                 kind, value = events.get_nowait()
@@ -326,15 +376,24 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
                 elif kind == "error":
                     status_var.set("运行失败：" + value)
                     log(status_var.get())
+                elif kind == "disconnected":
+                    disconnect_notice = str(value) + " 重新连接后，请点击“检测”，再启动转换。"
+                    selected_connection = ControllerConnection("disconnected")
+                    connection_var.set("连接方式：手柄已断开。")
+                    status_var.set(disconnect_notice)
+                    meter_var.set("输入：已断开    反馈：正在停止")
+                    ps5_var.set("")
+                    log(disconnect_notice)
                 elif kind == "status":
-                    status_var.set(value)
+                    if not disconnect_notice:
+                        status_var.set(value)
                     log(value)
                 elif kind in ("stopped", "test_done"):
                     set_busy(False)
                     ps5_var.set("")
-                    if not status_var.get().startswith("运行失败"):
+                    if not disconnect_notice and not status_var.get().startswith("运行失败"):
                         status_var.set(profiles[MODE_IDS[mode_var.get()]].stopped_notice)
-                    meter_var.set("输入：—    反馈：已停振")
+                    meter_var.set("输入：已断开    反馈：已停振" if disconnect_notice else "输入：—    反馈：已停振")
                 elif kind == "log":
                     log(value)
                 elif kind == "audio":
@@ -379,6 +438,7 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
             return
         if APP_DIAGNOSTICS:
             APP_DIAGNOSTICS.event("window_close_requested", engine_running=engine.running)
+        save_gain(closing_window=True)
         closing = True
         engine.stop()
         audio_busy = audio_repair_thread and audio_repair_thread.is_alive()
@@ -427,6 +487,10 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
             report["selected_profile"] = MODE_IDS[mode_var.get()]
             report["connection_check_finished"] = not connection_pending
             report["automatic_modes"] = automatic_modes
+            report["gain_percent"] = round(gain_var.get())
+            report["engine_gain"] = engine.gain
+            report["gain_label"] = str(gain_label.cget("text"))
+            report["gain_settings_status"] = str(gain_help_label.cget("text"))
             report["dependency_check_finished"] = not dependency_panel.checking and len(report["dependencies"]) == len(context.dependencies.packages)
             report["setup_open"] = bool(dependency_panel.dialog)
             if dependency_panel.dialog:
@@ -489,6 +553,14 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
     try:
         root.mainloop()
     finally:
+        # Also persist after an unexpected mainloop exit, without reading a
+        # destroyed Tk variable or trying to display a dialog.
+        if not receiver_close_test:
+            try:
+                preferences.save(gain_percent(engine.gain * 100))
+            except OSError as exc:
+                if APP_DIAGNOSTICS:
+                    APP_DIAGNOSTICS.event("gain_settings_save_failed", error=str(exc))
         connection_worker.shutdown(wait=True, cancel_futures=True)
         # Also clean up if Tcl exits its event loop through an unexpected path.
         engine.stop()

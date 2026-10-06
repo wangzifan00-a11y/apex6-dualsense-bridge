@@ -66,11 +66,16 @@ class LocalViiper:
             return False
 
     def start(self):
+        return self.start_cancellable(lambda: None)
+
+    def start_cancellable(self, check_cancel):
         try:
+            check_cancel()
             from dsbridge.platform.windows.audio import DefaultAudioGuard
             self.audio_guard = DefaultAudioGuard(self.base)
             # Snapshot/repair BEFORE Windows sees the new audio endpoints.
             self.audio_guard.start()
+            check_cancel()
             if not self._listening():
                 # The exact upstream release rejects other USB/IP ABIs.
                 program_files = os.environ.get("ProgramW6432") or os.environ.get("ProgramFiles", r"C:\Program Files")
@@ -80,6 +85,7 @@ class LocalViiper:
                 check = subprocess.run([str(driver_cli), "--version"], capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
                 if check.returncode or check.stdout.decode("utf-8", "replace").strip() != "0.9.7.7":
                     raise RuntimeError("USB/IP 驱动版本不匹配；此程序要求 0.9.7.7，不自动替换现有驱动。")
+                check_cancel()
                 executable = self.paths.assets / "vendor/viiper/viiper.exe"
                 expected_file = executable.with_suffix(".sha256")
                 if not executable.is_file() or not expected_file.is_file():
@@ -98,16 +104,26 @@ class LocalViiper:
                 self.child_job.assign(self.process)
                 deadline = time.monotonic() + 12
                 while not self._listening():
+                    check_cancel()
                     if self.process.poll() is not None:
                         raise RuntimeError("VIIPER 启动失败，驱动可能需重启后生效。详见 logs/viiper.log。")
                     if time.monotonic() >= deadline:
                         raise RuntimeError("VIIPER 启动超时，详见 logs/viiper.log。")
                     time.sleep(0.1)
-            self.backend.start()
+            check_cancel()
+            cancellable = getattr(self.backend, "start_cancellable", None)
+            if cancellable:
+                cancellable(check_cancel)
+            else:
+                self.backend.start()
+            check_cancel()
             if self.audio_guard.error:
                 raise self.audio_guard.error
         except Exception:
-            self.stop()
+            try:
+                self.stop()
+            except Exception:
+                pass  # Keep the initial disconnect/cancel reason; stop records cleanup failures.
             raise
 
     def update(self, state):
@@ -122,29 +138,47 @@ class LocalViiper:
         return status
 
     def stop(self):
-        try:
-            self.backend.stop()
-            self.last_cleanup_error = getattr(self.backend, "last_cleanup_error", None)
-        finally:
+        errors = []
+        def attempt(label, action):
             try:
-                if self.process is not None:
-                    # Never inspect or terminate another application's server.
-                    if self.process.poll() is None:
-                        self.process.terminate()
-                        try:
-                            self.process.wait(timeout=3)
-                        except subprocess.TimeoutExpired:
-                            self.process.kill()
-                            self.process.wait(timeout=3)
-                    self.process = None
-                if self.log_file:
-                    self.log_file.close()
-                    self.log_file = None
-            finally:
-                if self.child_job:
-                    self.child_job.close()
-                    self.child_job = None
-                # Keep protection through device removal, then final readback.
-                if self.audio_guard:
-                    self.audio_guard.stop()
-                    self.audio_guard = None
+                action()
+                return True
+            except Exception as exc:
+                errors.append(label + "：" + str(exc))
+                return False
+
+        attempt("虚拟手柄移除", self.backend.stop)
+        backend_error = getattr(self.backend, "last_cleanup_error", None)
+        if backend_error:
+            errors.append(str(backend_error))
+        process = self.process
+        if process is not None:
+            # Only the exact Popen child owned by this session can be terminated.
+            # A failed graceful termination must still reach the kill/job fallback.
+            try:
+                if process.poll() is None:
+                    try:
+                        process.terminate()
+                        process.wait(timeout=3)
+                    except Exception:
+                        if process.poll() is None:
+                            process.kill()
+                            process.wait(timeout=3)
+            except Exception as exc:
+                errors.append("本次 VIIPER 进程停止：" + str(exc))
+        # Independent cleanup stages: one failure cannot skip audio restoration.
+        if self.child_job and attempt("子进程作业释放", self.child_job.close):
+            self.child_job = None
+        if process is not None:
+            def reap():
+                if process.poll() is None:
+                    process.wait(timeout=3)
+            if attempt("本次 VIIPER 进程退出确认", reap):
+                self.process = None
+        if self.log_file and attempt("进程日志关闭", self.log_file.close):
+            self.log_file = None
+        if self.audio_guard and attempt("默认音频恢复", self.audio_guard.stop):
+            self.audio_guard = None
+        self.last_cleanup_error = "；".join(errors) or None
+        if errors:
+            raise RuntimeError(self.last_cleanup_error)

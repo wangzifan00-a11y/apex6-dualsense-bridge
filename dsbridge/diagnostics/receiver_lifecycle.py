@@ -40,9 +40,10 @@ def main(base, case):
     engine = Engine(xi, events, lambda *_: backend)
     engine.gain = 0
     if case == "start-failure":
-        def fail():
+        def fail(*_args):
             raise RuntimeError("显式启动失败自检")
         backend.viiper.start = fail
+        backend.viiper.start_cancellable = fail
     report = dict(case=case, process_id=os.getpid(), phase="starting", nonzero_test_haptics=False)
     report["before"] = visibility(paths)
     report["config_before"] = read_config()
