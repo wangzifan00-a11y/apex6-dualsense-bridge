@@ -15,7 +15,10 @@ ROOT = Path(__file__).resolve().parents[1]
 EXCLUDED = ("audio_haptics", "xbox_ds_backend", "probe_xbox_ds", "dsbridge.legacy", "dsbridge.virtual.dualshock4")
 RUNTIME_FILES = {"controller-identity.json", "audio-defaults.json", "receiver-hidhide-session.json",
                  "receiver-session.json", "receiver-input-lease.json", "feedback-session.json",
-                 "hidhide-session.json", "dependency-install-state.json", "viiper-usb-session.json", "ui-settings.json"}
+                 "hidhide-session.json", "dependency-install-state.json", "viiper-usb-session.json", "ui-settings.json",
+                 "controller-profiles.json"}
+RUNTIME_FILES.update({"controller-input-lease.json", "hot-switch-transaction.json", "hot-switch-status.json",
+                      "hot-switch-recovery-result.json", "hot-switch-recovery.json", "hot-switch-audit.json"})
 
 
 def sha(path):
@@ -25,7 +28,7 @@ def sha(path):
 
 def verify_clean(directory):
     leaks = [str(p.relative_to(directory)) for p in directory.rglob("*")
-             if p.is_file() and (p.name in RUNTIME_FILES or "logs" in p.relative_to(directory).parts
+             if p.is_file() and (p.name in RUNTIME_FILES or p.name.startswith(("hot-switch-request-", "input-guard-")) or "logs" in p.relative_to(directory).parts
                                 or p.suffix in (".lnk", ".download", ".download2"))]
     if leaks:
         raise RuntimeError("发布包混入运行状态或本机文件：" + ", ".join(leaks))
@@ -34,6 +37,9 @@ def verify_clean(directory):
 def assemble_assets(target):
     from dsbridge.dependencies.catalog import PACKAGES, verify_package
     (target / "vendor").mkdir()
+    helper = target / "native" / "hotswitch"
+    helper.mkdir(parents=True)
+    shutil.copy2(ROOT / "native/hotswitch/bin/DSBridgeHotSwitch.exe", helper / "DSBridgeHotSwitch.exe")
     shutil.copytree(ROOT / "vendor" / "viiper", target / "vendor" / "viiper")
     (target / "installers").mkdir()
     for package in PACKAGES:
@@ -48,6 +54,15 @@ def assemble_assets(target):
     (target / "viiper-config.json").write_text(json.dumps({"host": "127.0.0.1", "port": 3242, "haptics_gain": 1.0}, indent=2), encoding="utf-8")
     for name, arguments in (("启动蓝牙DS桥接.cmd", ""), ("启动2.4G四马达DS桥接.cmd", "--receiver-mode")):
         (target / name).write_text('@echo off\nchcp 65001 >nul\nstart "" "%~dp0' + APP + '.exe" ' + arguments + '\n', encoding="utf-8-sig")
+    (target / "修复自动切换组件.cmd").write_text(
+        '@echo off\nchcp 65001 >nul\n'
+        'echo 正在检查和修复自动切换组件，请确认 Windows 权限提示。\n'
+        '"%~dp0' + APP + '.exe" --install-hot-switch\n'
+        'if errorlevel 1 (\n'
+        '  echo 未完成修复。请查看程序数据目录中的日志，或取消后重新运行本入口。\n'
+        ') else (\n'
+        '  echo 自动切换组件已就绪，可以返回震动桥启动转换。\n'
+        ')\npause\n', encoding="utf-8-sig")
     # Keep a byte-identical helper outside HidHide's allow-list.
     shutil.copy2(target / (APP + ".exe"), target / "接收器输入检查.exe")
 
@@ -90,6 +105,8 @@ def main(argv=None):
         valid, detail = verify_package(ROOT, package)
         if not valid:
             raise RuntimeError(package.name + " " + detail)
+    from tools.build_hotswitch_helper import main as build_hot_switch
+    build_hot_switch()
     import PyInstaller.__main__
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     work = ROOT / "build" / stamp

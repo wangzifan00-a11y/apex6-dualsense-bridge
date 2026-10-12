@@ -33,10 +33,12 @@ class ControllerRegistry:
 
 class InputRouter:
     """The view selects a profile; only its adapter owns the input API."""
-    def __init__(self, registry):
+    def __init__(self, registry, *, resolve_connection=None):
         self.registry = registry
+        self.resolve_connection = resolve_connection or (lambda connection: connection)
         self._key = None
         self._input = None
+        self._prepared_input = None
 
     def select(self, mode):
         key = self.registry.profiles[mode].adapter
@@ -56,9 +58,56 @@ class InputRouter:
     def get_state(self, slot):
         return self._input.get_state(slot)
 
+    def connection(self, slot):
+        from dsbridge.core.connection import ControllerConnection
+        describe = getattr(self._input, "connection", None)
+        return self.resolve_connection(describe(slot)) if describe else ControllerConnection()
+
+    def rebind(self, expected):
+        """Resolve the captured device after a planned refresh, never another pad."""
+        rebind = getattr(self._input, "rebind", None)
+        if rebind is None:
+            raise RuntimeError("当前手柄扩展不支持输入热切换")
+        self._prepared_input = None
+        return rebind(expected)
+
+    def prepare_input(self, slot):
+        """Resolve the selected physical model once, before virtual creation.
+
+        Extensions keep their own input semantics; a built-in device's mapping
+        is chosen anew at every start and does not alter physical/UI state.
+        """
+        from dsbridge.controllers.flydigi.apex6.input_mapping import mapping_for, unchanged
+        self._prepared_input = None
+        if self._key not in ("xinput", "flydigi.apex6.receiver"):
+            return unchanged
+        describe = getattr(self._input, "connection", None)
+        if describe is None:
+            return unchanged
+        connection = self.resolve_connection(describe(slot))
+        transform = mapping_for(connection)
+        if connection.device_id:
+            self._prepared_input = (slot, connection)
+        return transform
+
+    def validate_input(self, slot):
+        """Recheck a mapped physical identity once, after virtual startup.
+
+        This is not another model query: an existing receiver session may own
+        that interface. Providers without this optional method stay compatible.
+        """
+        if self._prepared_input is None:
+            return True
+        prepared_slot, connection = self._prepared_input
+        if slot != prepared_slot:
+            return False
+        validate = getattr(self._input, "validate_connection", None)
+        return validate(slot, connection) if validate else True
+
     def set_rumble(self, slot, left, right):
         return self._input.set_rumble(slot, left, right)
 
     def close(self):
+        self._prepared_input = None
         if self._input:
             self._input.close()

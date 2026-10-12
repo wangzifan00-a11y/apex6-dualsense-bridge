@@ -25,3 +25,10 @@ feedback-session.json
 dependency-install-state.json
 ui-settings.json
 .ui-settings-*.tmp
+controller-profiles.json
+.controller-profiles-*.tmp
+hot-switch-*.json
+input-guard-*.json
+controller-input-lease.json
+receiver-input-lease.json
+release-manifest.json

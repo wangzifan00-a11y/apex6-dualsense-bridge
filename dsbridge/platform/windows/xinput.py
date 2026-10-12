@@ -150,6 +150,45 @@ class XInput:
         from dsbridge.platform.windows.connection import detect_connection
         return detect_connection(self.identity(index))
 
+    def validate_connection(self, index, expected):
+        """Recheck the captured slot's PnP input; never query its model again."""
+        from dsbridge.platform.windows.connection import matches_selected_input, present_gamepads
+        identity = self.identity(index)
+        if identity is None or not expected.device_id:
+            return False
+        vendor, product = identity.get("vendor_id"), identity.get("product_id")
+        if not vendor or not product or (vendor, product) != (expected.vendor_id, expected.product_id):
+            return False
+        return matches_selected_input(identity, expected, present_gamepads(vendor, product))
+
+    def rebind(self, expected):
+        """Accept exactly one matching slot and one matching physical PnP input.
+
+        XInput does not expose a stable path per slot, so both uniqueness checks
+        are necessary. After a port cycle the caller supplies the lease's
+        validated current HID connection; this layer never guesses a new HID
+        identity from a matching VID/PID alone. No button correlation or vendor
+        command is used.
+        """
+        from dsbridge.platform.windows.connection import matches_selected_input, present_gamepads
+        vendor, product = expected.vendor_id, expected.product_id
+        if not expected.device_id or not vendor or not product:
+            raise RuntimeError("无法确认待恢复手柄的实体身份")
+        slots = []
+        for slot in range(4):
+            identity = self.identity(slot)
+            if identity is not None and (not identity.get("vendor_id") or not identity.get("product_id")):
+                # A live slot with temporarily unavailable capabilities could
+                # be another instance of the selected controller. Wait rather
+                # than claim that the known matching slot is unique.
+                return None
+            if identity and (identity.get("vendor_id"), identity.get("product_id")) == (vendor, product):
+                slots.append((slot, identity))
+        if len(slots) != 1:
+            return None
+        slot, identity = slots[0]
+        return slot if matches_selected_input(identity, expected, present_gamepads(vendor, product)) else None
+
     def set_rumble(self, index: int, left: float, right: float) -> bool:
         index = _slot(index)
         vibration = XINPUT_VIBRATION(motor_word(left), motor_word(right))

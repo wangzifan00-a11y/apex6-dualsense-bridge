@@ -16,12 +16,13 @@ def scale_feedback(value, gain):
 
 class Engine:
     """Owns one input slot and all feedback writes until a clean stop."""
-    def __init__(self, xinput, events, backend_factory=None, *, diagnostics=None, profiles=None):
+    def __init__(self, xinput, events, backend_factory=None, *, diagnostics=None, profiles=None, transition_factory=None):
         self.profiles = PROFILES if profiles is None else profiles
         self.diagnostics = diagnostics
         self.xinput = xinput
         self.events = events
         self.backend_factory = backend_factory
+        self.transition_factory = transition_factory
         self.thread = None
         self.cancel = threading.Event()
         self.gain = 0.7
@@ -57,6 +58,7 @@ class Engine:
     def _run(self, index, mode):
         profile = self.profiles[mode]
         backend = None
+        transition = None
         session_id = uuid.uuid4().hex
         started_at = datetime.now(timezone.utc).isoformat()
         output_peak = (0.0, 0.0)
@@ -65,9 +67,15 @@ class Engine:
         disconnected = False
         metadata = None
 
-        def check_start():
+        def check_cancel():
             if self.cancel.is_set():
                 raise BridgeCancelled()
+            error = getattr(transition, "error", None) if transition else None
+            if error:
+                raise error if isinstance(error, Exception) else RuntimeError(str(error))
+
+        def check_start():
+            check_cancel()
             if self.xinput.get_state(index) is None:
                 raise ControllerDisconnected("手柄连接已断开，正在停止本次桥接。重新连接后请检测并启动。")
             error = getattr(backend, "error", None) if backend else None
@@ -80,25 +88,54 @@ class Engine:
                     "started_at": started_at, "updated_at": datetime.now(timezone.utc).isoformat(),
                     "phase": phase, "mode": profile.label, "slot": index, "gain": self.gain,
                     "output_peak": output_peak, "output_nonzero_writes": output_nonzero_writes,
-                    "ps5": metadata, "error": failure}
+                    "ps5": metadata, "error": failure,
+                    "input_transition": transition.status() if transition else None}
 
         # The receiver owns waveform output; never overwrite it with XInput rumble.
         owns_rumble = not profile.managed_output
         try:
             check_start()
-            backend = self._make_backend(mode)
+            if self.transition_factory:
+                transition = self.transition_factory(self.xinput, index, mode, self.events)
+                if transition:
+                    # A planned PnP refresh disconnects the old slot. Only the
+                    # transition may rebind, and only to this physical device.
+                    # Until it succeeds, do not write to any potentially reused slot.
+                    owns_rumble = False
+                    transition.start_cancellable(check_cancel)
+                    index = transition.slot
+                    check_start()
+                    owns_rumble = not profile.managed_output
+            prepare_input = getattr(self.xinput, "prepare_input", None)
+            transform = prepare_input(index) if prepare_input else (lambda state: state)
+            if not callable(transform):
+                raise RuntimeError("手柄输入映射无效")
+            check_start()
+            backend = transition.create_backend() if transition else self._make_backend(mode)
+            if profile.managed_output:
+                # A running game may send feedback as soon as DS appears.
+                # Apply the chosen gain before the output worker can be armed.
+                backend.set_gain(self.gain)
             start_cancellable = getattr(backend, "start_cancellable", None)
             if start_cancellable:
                 start_cancellable(check_start)
             else:
                 backend.start()
             check_start()
+            validate_input = getattr(self.xinput, "validate_input", None)
+            if validate_input and validate_input(index) is False:
+                # A reused slot may now belong to another physical controller.
+                # No engine rumble was sent during initialization, so cleanup
+                # must not overwrite that other controller's current output.
+                owns_rumble = False
+                raise ControllerDisconnected("所选实体手柄已变更，启动已停止。请重新检测手柄后再启动。")
             self.events.put(("status", "已启动：" + profile.label))
             last_value = None
             last_raw = (0, 0)
             last_write = 0.0
             last_ui = 0.0
             while not self.cancel.is_set():
+                check_cancel()
                 now = time.monotonic()
                 state = self.xinput.get_state(index)
                 if state is None:
@@ -109,7 +146,7 @@ class Engine:
                         raise error if isinstance(error, Exception) else RuntimeError(str(error))
                     if profile.managed_output:
                         backend.set_gain(self.gain)
-                    backend.update(state)
+                    backend.update(transform(state))
                     raw = backend.poll_feedback()
                     # None means no new event, not a game-authored stop command.
                     if raw is not None:
@@ -164,11 +201,20 @@ class Engine:
                     backend.stop()
                     cleanup_error = getattr(backend, "last_cleanup_error", None)
                     if cleanup_error:
-                        self.events.put(("log", "设备清理提示：" + cleanup_error))
+                        cleanup_failure = "停止后的设备恢复未完成：" + str(cleanup_error)
+                        failure = failure or cleanup_failure
+                        self.events.put(("error", cleanup_failure))
                     if hasattr(backend, "status"):
                         metadata = backend.status()
                 except Exception as exc:
                     cleanup_failure = "停止后的设备恢复未完成：" + str(exc)
+                    failure = failure or cleanup_failure
+                    self.events.put(("error", cleanup_failure))
+            if transition:
+                try:
+                    transition.stop()
+                except Exception as exc:
+                    cleanup_failure = "停止后的输入切换恢复未完成：" + str(exc)
                     failure = failure or cleanup_failure
                     self.events.put(("error", cleanup_failure))
             close_input = getattr(self.xinput, "close", None)

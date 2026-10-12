@@ -14,6 +14,8 @@ class ControllerConnection:
     vendor_id: int | None = None
     product_id: int | None = None
     profile: int | str | None = None
+    model: str = ""
+    model_source: str = ""
 
     @property
     def label(self):

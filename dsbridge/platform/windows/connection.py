@@ -9,6 +9,22 @@ import re
 from dsbridge.core.connection import ControllerConnection
 
 VIRTUAL_SERVICES = {"vigembus", "usbip2_ude", "vhidmini", "vjoy"}
+APEX6_PRO_MODEL = "flydigi.apex6pro"
+# Only an explicit device model name is useful here. Xbox Bluetooth IDs and
+# generic names are shared by real Xbox pads and cannot identify an APEX.
+_APEX6_PRO_NAME = re.compile(
+    r"^(?:(?:flydigi|飞智)[\s_-]*)?(?:apex[\s_-]*6[\s_-]*pro|八爪鱼[\s_-]*6[\s_-]*pro)"
+    r"(?=$|[\s/_（(]|影之刃零)", re.I)
+
+
+def _bluetooth_model(row):
+    names = [row.get("name", "")]
+    for ancestor in row["ancestors"]:
+        # Exclude the radio, USB hub and other machine ancestors. Their names
+        # do not identify the selected physical controller.
+        if ancestor["instance_id"].upper().startswith(("HID\\", "BTHENUM\\", "BTHLEDEVICE\\", "BTHLE\\")):
+            names.append(ancestor.get("name", ""))
+    return APEX6_PRO_MODEL if any(_APEX6_PRO_NAME.match(name.strip()) for name in names) else ""
 
 
 def present_gamepads(vendor, product):
@@ -103,14 +119,21 @@ def classify_connection(identity, rows, *, flydigi=None):
     if services & VIRTUAL_SERVICES or any(i.startswith(("ROOT\\VIGEM", "ROOT\\VJOY")) for i in ids):
         return ControllerConnection("virtual", detail="请选择实体手柄。", **base)
     if any(i.startswith(("BTHENUM\\", "BTHLEDEVICE\\", "BTHLE\\")) for i in ids):
-        return ControllerConnection("bluetooth", detail="已核对所选手柄的蓝牙设备路径。", profile=1, **base)
+        model = _bluetooth_model(row)
+        return ControllerConnection("bluetooth", detail="已核对所选手柄的蓝牙设备路径。",
+                                    profile=1, model=model, model_source="device_name" if model else "", **base)
     if not any(i.startswith("USB\\VID_") for i in ids):
         return ControllerConnection(detail="设备路径未提供可确认的连接方式。", **base)
     if (base["vendor_id"], base["product_id"]) == (0x37D7, 0x2502):
         if flydigi and flydigi.get("kind") in ("receiver", "usb"):
             kind = flydigi["kind"]
+            # SDL identifies 0x95 as APEX 6, 0x96 as Pro and 0x98 as the
+            # Phantom Blade Zero Pro edition. The base model must stay generic.
+            device_model = flydigi.get("model")
+            model = APEX6_PRO_MODEL if type(device_model) is int and device_model in (0x96, 0x98) else ""
             return ControllerConnection(kind, detail="已读取八爪鱼当前连接状态。",
-                                        profile=5 if kind == "receiver" else 1, **base)
+                                        profile=5 if kind == "receiver" else 1, model=model,
+                                        model_source="protocol" if model else "", **base)
         return ControllerConnection(detail="八爪鱼连接状态尚未读到；请关闭其他手柄工具后重新检测。", **base)
     if identity.get("flags", 0) & 2 or any(re.search(r"\breceiver\b|接收器|\bdongle\b", a.get("name", ""), re.I) for a in ancestors[:4]):
         return ControllerConnection("receiver", detail="Windows 报告此手柄通过无线接收器连接。", profile=1, **base)
@@ -121,8 +144,26 @@ def detect_connection(identity):
     if identity is None or not identity.get("vendor_id") or not identity.get("product_id"):
         return classify_connection(identity, [])
     rows = present_gamepads(identity["vendor_id"], identity["product_id"])
-    extra = None
-    if len(rows) == 1 and (identity["vendor_id"], identity["product_id"]) == (0x37D7, 0x2502):
-        from dsbridge.controllers.flydigi.apex6.connection import query_connection
-        extra = query_connection(rows[0])
-    return classify_connection(identity, rows, flydigi=extra)
+    preliminary = classify_connection(identity, rows)
+    # The pure classifier first proves that this is one nonvirtual physical
+    # input. Never send a model query merely because a VID/PID matched.
+    if ((identity["vendor_id"], identity["product_id"]) != (0x37D7, 0x2502)
+            or preliminary.kind != "unknown" or not preliminary.device_id):
+        return preliminary
+    selected = next(row for row in rows if row["instance_id"].casefold() == preliminary.device_id.casefold())
+    if not any(a["instance_id"].upper().startswith("USB\\VID_") for a in selected["ancestors"]):
+        return preliminary
+    from dsbridge.controllers.flydigi.apex6.connection import query_connection
+    return classify_connection(identity, rows, flydigi=query_connection(selected))
+
+
+def matches_selected_input(identity, expected, rows):
+    """Compare one selected physical input without querying vendor commands."""
+    if identity is None or not expected.device_id:
+        return False
+    pair = (identity.get("vendor_id"), identity.get("product_id"))
+    if not all(pair) or pair != (expected.vendor_id, expected.product_id):
+        return False
+    current = classify_connection(identity, rows)
+    return (current.kind not in ("disconnected", "virtual") and bool(current.device_id)
+            and current.device_id.casefold() == expected.device_id.casefold())

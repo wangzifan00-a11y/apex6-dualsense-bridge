@@ -12,9 +12,11 @@ from dsbridge.core.session_log import FeedbackSessionLog
 from dsbridge.core.modes import MODES, MODE_IDS, DETAILS
 from dsbridge.ui.presentation import feedback_text
 from dsbridge.runtime.preferences import GainPreferences, gain_percent, MIN_GAIN_PERCENT, MAX_GAIN_PERCENT
+from dsbridge.runtime.controller_profiles import APEX6PRO_MODEL
 from dsbridge import __version__
 
-def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_test=False, setup=False, *, context=None):
+def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_test=False, setup=False, *, context=None,
+            startup_recovery_warning=None):
     from dsbridge.application.context import ApplicationContext
     context = context or ApplicationContext.default()
     profiles = context.registry.profiles
@@ -40,10 +42,14 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
     frame.pack(fill="both", expand=True)
     ttk.Label(frame, text="八爪鱼震动桥", font=("Microsoft YaHei UI", 22, "bold")).pack(anchor="w")
     ttk.Label(frame, text="PS5 DualSense 桥接 · 自动识别蓝牙 / 接收器 / USB", foreground="#58677b").pack(anchor="w", pady=(3, 12))
+    if startup_recovery_warning:
+        ttk.Label(frame, text="上次恢复尚未完成：" + startup_recovery_warning,
+                  foreground="#9c4e00", wraplength=740).pack(anchor="w", pady=(0, 8))
 
     events = queue.Queue()
     xi = context.create_input(initial_mode)
-    engine = Engine(xi, events, context.create_backend, diagnostics=context.diagnostics, profiles=profiles)
+    engine = Engine(xi, events, context.create_backend, diagnostics=context.diagnostics, profiles=profiles,
+                    transition_factory=getattr(context, "create_transition", None))
     session_log = FeedbackSessionLog(BASE / "feedback-session.json")
     session_log_failed = False
     mode_var = tk.StringVar(value=MODES[initial_mode])
@@ -68,6 +74,9 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
     devices = {}
     audio_repair_thread = None
     disconnect_notice = None
+    controller_busy = False
+    refresh_input_pending = False
+    pro_var = tk.BooleanVar(value=False)
 
     row = ttk.Frame(frame)
     row.pack(fill="x")
@@ -118,12 +127,14 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
             connection_var.set("连接方式：未检测到在线手柄。")
             start_button.configure(state="disabled")
             test_button.configure(state="disabled")
+            refresh_controller_profile()
             return
         slot, mode = devices[label], MODE_IDS[mode_var.get()]
         connection_pending = True
         connection_var.set("连接方式：正在检测所选手柄…")
         start_button.configure(state="disabled")
         test_button.configure(state="disabled")
+        refresh_controller_profile()
         def read_connection():
             try:
                 value = context.detect_connection(mode, slot)
@@ -137,6 +148,40 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
     detect_button = ttk.Button(row, text="检测", command=detect)
     detect_button.pack(side="left")
     ttk.Label(frame, textvariable=connection_var, foreground="#195d98", wraplength=780).pack(anchor="w", pady=(8, 0))
+
+    def refresh_controller_profile():
+        identified = selected_connection.model == APEX6PRO_MODEL
+        pro_var.set(identified)
+        native = bool(selected_connection.model) and selected_connection.model_source != "user"
+        profile_check.configure(text="已识别八爪鱼6 Pro（View 键映射 DS 触摸板按下）" if native and identified else
+                                "这只蓝牙手柄是八爪鱼6 Pro（启用触摸板按键）")
+        editable = (selected_connection.kind == "bluetooth" and bool(selected_connection.device_id)
+                    and not native and not controller_busy and not connection_pending and not closing)
+        profile_check.configure(state="normal" if editable else "disabled")
+
+    def controller_profile_changed():
+        nonlocal selected_connection
+        if (controller_busy or connection_pending or closing or selected_connection.kind != "bluetooth"
+                or (selected_connection.model and selected_connection.model_source != "user")):
+            refresh_controller_profile()
+            return
+        enabled = bool(pro_var.get())
+        try:
+            selected_connection = context.set_bluetooth_pro(selected_connection, enabled)
+        except (OSError, ValueError) as exc:
+            status_var.set("手柄绑定保存失败，仍使用之前的按键映射：" + str(exc))
+            log(status_var.get())
+            if APP_DIAGNOSTICS:
+                APP_DIAGNOSTICS.event("controller_profile_save_failed", error=str(exc))
+        else:
+            status_var.set("已记住这只蓝牙手柄：View 键映射为 DS 触摸板按下。" if enabled else
+                           "已取消这只蓝牙手柄的型号绑定，View 键恢复原映射。")
+            log(status_var.get())
+        refresh_controller_profile()
+
+    profile_check = ttk.Checkbutton(frame, text="这只蓝牙手柄是八爪鱼6 Pro（启用触摸板按键）",
+                                   variable=pro_var, command=controller_profile_changed, state="disabled")
+    profile_check.pack(anchor="w", pady=(4, 0))
     ttk.Label(frame, text="PS5 桥接方式（根据所选手柄自动匹配）").pack(anchor="w", pady=(10, 5))
     mode_box = ttk.Combobox(frame, textvariable=mode_var, values=tuple(MODES.values()), state="disabled" if automatic_modes else "readonly")
     mode_box.pack(fill="x")
@@ -151,7 +196,7 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
 
     mode_box.bind("<<ComboboxSelected>>", mode_changed)
     gain_row = ttk.Frame(frame)
-    gain_row.pack(fill="x", pady=(18, 8))
+    gain_row.pack(fill="x", pady=(10, 8))
     gain_label = ttk.Label(gain_row, text="转换强度 " + str(round(gain_var.get())) + "%")
     gain_label.pack(side="left")
 
@@ -200,6 +245,8 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
     controls.pack(fill="x", pady=14)
 
     def set_busy(busy):
+        nonlocal controller_busy
+        controller_busy = busy
         dependency_panel.set_conversion_busy(busy)
         device_box.configure(state="disabled" if busy else "readonly")
         mode_box.configure(state="disabled" if busy or automatic_modes else "readonly")
@@ -208,6 +255,7 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
         start_button.configure(state="normal" if ready else "disabled")
         test_button.configure(state="normal" if ready else "disabled")
         stop_button.configure(state="normal" if busy else "disabled")
+        refresh_controller_profile()
 
     def start():
         # Re-read before starting: switching cables may reuse the same slot.
@@ -288,13 +336,17 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
     ttk.Label(frame, textvariable=ps5_var, foreground="#58677b").pack(anchor="w")
     ttk.Label(frame, textvariable=audio_status_var, foreground="#58677b", wraplength=780).pack(anchor="w")
     ttk.Label(frame, text="运行日志").pack(anchor="w", pady=(15, 5))
-    log_box = tk.Text(frame, height=7, font=("Microsoft YaHei UI", 9), bg="#f1f4f8", relief="flat", wrap="word", state="disabled")
+    log_box = tk.Text(frame, height=6, font=("Microsoft YaHei UI", 9), bg="#f1f4f8", relief="flat", wrap="word", state="disabled")
     log_box.pack(fill="both", expand=True)
     from dsbridge.ui.dependencies import DependencyPanel
     dependency_panel = DependencyPanel(frame, context.paths, log=log, manager=context.dependencies, profiles=profiles)
     closing = False
     pump_timer = None
     gui_errors = []
+    if context.controller_profiles.load_error:
+        log("手柄绑定设置读取失败，未应用已保存的蓝牙型号：" + context.controller_profiles.load_error)
+        if APP_DIAGNOSTICS:
+            APP_DIAGNOSTICS.event("controller_profile_load_failed", error=context.controller_profiles.load_error)
     if preferences.load_error:
         log("上次转换强度无法读取，已使用默认 70%：" + preferences.load_error)
         gain_help_label.configure(text="上次强度设置无法读取，已使用默认 70%。", foreground="#b34525")
@@ -331,7 +383,7 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
     root.report_callback_exception = report_gui_exception
 
     def pump_once():
-        nonlocal closing, session_log_failed, connection_pending, selected_connection, disconnect_notice
+        nonlocal closing, session_log_failed, connection_pending, selected_connection, disconnect_notice, refresh_input_pending
         try:
             while True:
                 kind, value = events.get_nowait()
@@ -383,6 +435,7 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
                     status_var.set(disconnect_notice)
                     meter_var.set("输入：已断开    反馈：正在停止")
                     ps5_var.set("")
+                    refresh_controller_profile()
                     log(disconnect_notice)
                 elif kind == "status":
                     if not disconnect_notice:
@@ -394,6 +447,8 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
                     if not disconnect_notice and not status_var.get().startswith("运行失败"):
                         status_var.set(profiles[MODE_IDS[mode_var.get()]].stopped_notice)
                     meter_var.set("输入：已断开    反馈：已停振" if disconnect_notice else "输入：—    反馈：已停振")
+                    if kind == "stopped" and not disconnect_notice and callable(getattr(context, "create_transition", None)):
+                        refresh_input_pending = True
                 elif kind == "log":
                     log(value)
                 elif kind == "audio":
@@ -410,6 +465,13 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
                     repair_button.configure(state="normal")
         except queue.Empty:
             pass
+        if refresh_input_pending and not closing and not engine.running and not controller_busy and not connection_pending:
+            # PnP may assign a new XInput slot on restoration. Refresh the list
+            # automatically while keeping the completed/error message visible.
+            refresh_input_pending = False
+            finished_message = status_var.get()
+            detect()
+            status_var.set(finished_message)
         audio_busy = audio_repair_thread and audio_repair_thread.is_alive()
         if closing and not engine.running and not audio_busy and not connection_pending and str(stop_button["state"]) == "disabled":
             destroy_window()
@@ -440,6 +502,7 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
             APP_DIAGNOSTICS.event("window_close_requested", engine_running=engine.running)
         save_gain(closing_window=True)
         closing = True
+        refresh_controller_profile()
         engine.stop()
         audio_busy = audio_repair_thread and audio_repair_thread.is_alive()
         if not engine.running and not audio_busy and not connection_pending and str(stop_button["state"]) == "disabled":
@@ -449,6 +512,9 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
 
     root.protocol("WM_DELETE_WINDOW", close)
     detect()
+    if startup_recovery_warning:
+        status_var.set("上次恢复尚未完成，请查看提示后重新检测或重试。")
+        log(startup_recovery_warning)
     pump()
     if not smoke:
         repair_audio()
@@ -491,6 +557,8 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
             report["engine_gain"] = engine.gain
             report["gain_label"] = str(gain_label.cget("text"))
             report["gain_settings_status"] = str(gain_help_label.cget("text"))
+            report["controller_profile_checked"] = bool(pro_var.get())
+            report["controller_profile_state"] = str(profile_check.cget("state"))
             report["dependency_check_finished"] = not dependency_panel.checking and len(report["dependencies"]) == len(context.dependencies.packages)
             report["setup_open"] = bool(dependency_panel.dialog)
             if dependency_panel.dialog:
@@ -516,7 +584,7 @@ def run_gui(smoke=False, callback_test=False, initial_mode=1, receiver_close_tes
         # Zero gain and no injected feedback keep this test physically silent.
         from dsbridge.diagnostics.receiver_lifecycle import visibility, counts
         from dsbridge.controllers.flydigi.apex6.recovery import save_json
-        deadline = time.monotonic() + 45
+        deadline = time.monotonic() + 120
         def lifecycle_step():
             try:
                 if gui_errors or status_var.get().startswith("运行失败"):

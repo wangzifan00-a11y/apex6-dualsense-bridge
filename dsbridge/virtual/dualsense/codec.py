@@ -80,11 +80,19 @@ def encode_input(state: Mapping) -> bytes:
     buttons is XInput wButtons; triggers are 0..255, axes -32768..32767.
     Guide is accepted when supplied as XInput's undocumented 0x0400 bit.
     Unknown Xbox paddles cannot be read through standard XInput.
+    Optional touchpad_click is a strict boolean for the independent Sony click
+    button. Touch contacts remain inactive; physical Back remapping is owned
+    by the controller adapter, not by this shared codec.
     """
     if not isinstance(state, Mapping):
         raise ValueError("XInput state must be a mapping")
     raw_buttons = _integer(state, "buttons", 0, 0xFFFF)
     buttons = sum(sony for xbox, sony in _BUTTON_MAP if raw_buttons & xbox)
+    touchpad_click = state.get("touchpad_click", False)
+    if not isinstance(touchpad_click, bool):
+        raise ValueError("touchpad_click must be a boolean")
+    if touchpad_click:
+        buttons |= 0x00020000
     lt = _integer(state, "left_trigger", 0, 255)
     rt = _integer(state, "right_trigger", 0, 255)
     if lt:
