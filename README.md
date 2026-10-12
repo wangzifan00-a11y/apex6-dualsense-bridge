@@ -41,3 +41,17 @@
 **2.4.0 本轮实测：八爪鱼 6 Pro、2.4G 接收器、《瑞奇与叮当：时空跳转》**。已确认游戏运行中切换、收到原生 DS 触觉与扳机效果，以及停止后的实体输入恢复。USB 有线热切换及其他游戏尚未由本轮实测覆盖，不代表所有游戏、手柄和固件均兼容。
 
 源码构建见 [BUILD](docs/BUILD.md)，扩展接口见[手柄扩展指南](docs/手柄扩展指南.txt)，第三方组件见 [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES.md)。
+
+## 🔋 给作者续个航
+
+手柄负责震，作者负责肝。用着顺手？请作者喝杯奶茶，让修 Bug 的手少抖一点。
+
+**项目免费，打赏随缘；钱包休息，点个 Star 也香！**
+
+<p align="center">
+  <a href="docs/assets/wechat-pay.png">
+    <img src="docs/assets/wechat-pay.png" alt="微信打赏收款码" width="320" />
+  </a>
+</p>
+
+<p align="center">微信扫一扫，或点击图片查看原图。</p>
